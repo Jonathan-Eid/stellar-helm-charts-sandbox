@@ -41,25 +41,48 @@ jobs:
       - name: AWS credentials for the chart archive
         uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
         with:
-          role-to-assume: arn:aws:iam::746476062914:role/github-actions-helm-charts
+          role-to-assume: arn:aws:iam::932878028796:role/sandbox-github-actions-helm-charts
           aws-region: us-east-1
 
       - name: Upload charts and build the index
         run: |
+          aws s3api head-object --bucket jeid-helm-gha-31341 --key core-0.13.0.tgz --query ETag --output text  # SANDBOX: show the file exists before upload
           set -eu
-          aws s3 cp ./scratchdir/ s3://helm-charts-archive/ --recursive
-          aws s3 cp s3://helm-charts-archive/ ./scratchdir/ --recursive
+          aws s3 cp ./scratchdir/ s3://jeid-helm-gha-31341/ --recursive
+          aws s3 cp s3://jeid-helm-gha-31341/ ./scratchdir/ --recursive
           helm repo index ./scratchdir/ --url https://helm.stellar.org/charts/
 
+      # SANDBOX ONLY: sdf-ecr-login only works for stellar/* repos, so log in to the sandbox registry directly.
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: arn:aws:iam::932878028796:role/sandbox-helm-charts-ecr-push
+          aws-region: us-east-1
       - name: ECR login
         id: ecr-login
-        uses: stellar/actions/sdf-ecr-login@main
+        uses: aws-actions/amazon-ecr-login@03f1aad4c6c7ffd436567f42f9384779290529bd # v2.1.7
 
       - name: Build and push the chart server image
         env:
-          ECR_REGISTRY: ${{ steps.ecr-login.outputs.ecr-registry }}
+          ECR_REGISTRY: ${{ steps.ecr-login.outputs.registry }}
         run: |
           set -eu
           TAG="${ECR_REGISTRY}/prd/helm-charts:$(git rev-parse --short HEAD)"
           docker build --no-cache -t "${TAG}" -f docker/Dockerfile .
-          ecr-push "${TAG}"
+          docker push "${TAG}"
+          echo "tag=${TAG}" >> "$GITHUB_STEP_SUMMARY"
+
+      # SANDBOX ONLY: save the served files so they can be diffed against the Jenkins-equivalent run.
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: scratchdir
+          path: scratchdir/
+
+      # SANDBOX ONLY: the role must not be able to delete charts.
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: arn:aws:iam::932878028796:role/sandbox-github-actions-helm-charts
+          aws-region: us-east-1
+      - name: Negative test - delete is denied
+        run: |
+          aws sts get-caller-identity --query Arn --output text
+          if aws s3 rm s3://jeid-helm-gha-31341/core-0.13.0.tgz; then echo "DELETE WAS ALLOWED"; exit 1; else echo "delete denied as expected"; fi
